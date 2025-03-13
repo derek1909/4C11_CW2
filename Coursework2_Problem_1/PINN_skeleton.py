@@ -1,10 +1,25 @@
+import os
+import wandb
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import numpy as np
-import scipy
+import scipy.io
+import matplotlib.tri as mtri
 
-# Define Neural Network
+# Initialize wandb project (replace "Plate_PINN" and "your_username" with your project name and wandb username)
+wandb.init(project="Plate_PINN")
+
+# Log configuration parameters to wandb
+config = wandb.config
+config.learning_rate = 1e-3
+config.iterations = int(5e4)
+config.Disp_layer = [2, 300, 300, 2]
+config.Stress_layer = [2, 400, 400, 3]
+config.E = 10.0
+config.mu = 0.3
+
+# Define the DenseNet neural network
 class DenseNet(nn.Module):
     def __init__(self, layers, nonlinearity):
         super(DenseNet, self).__init__()
@@ -27,10 +42,9 @@ class DenseNet(nn.Module):
 
         return x
 
-############################# Data processing #############################
-# Read data from mat
-# Specify your data path here
-path = 'Coursework2/Coursework2_Problem_1/Plate_data.mat'
+############################# Data Processing #############################
+# Specify the path to your .mat data file
+path = './Coursework2_Problem_1/plate_data.mat'
 data = scipy.io.loadmat(path)
 torch.set_default_tensor_type(torch.DoubleTensor)
 L_boundary = torch.tensor(data['L_boundary'], dtype=torch.float64)
@@ -65,37 +79,38 @@ disp_fix = disp_truth[rand_index,:]
 # This will help us to avoid differentiating NN1 twice (why?)
 # As it is well known that PINN suffers from higher order derivatives
 
-Disp_layer = [2, 300, 300, 2] # Architecture of displacement net - you may change as you wish
-Stress_layer = [2,400,400,3] # Architecture of stress net - you may change as you wish
+Disp_layer = config.Disp_layer  # Displacement network layers
+Stress_layer = config.Stress_layer  # Stress network layers
 
 stress_net = DenseNet(Stress_layer,nn.Tanh) # Note we choose hyperbolic tangent as an activation function here
 disp_net =  DenseNet(Disp_layer,nn.Tanh)
 
 # Define material properties
-E = 10.0        # Young's modulus
-mu = 0.3        # Poisson's ratio
-
+E = config.E        
+mu = config.mu        
 stiff = E/(1-mu**2)*torch.tensor([[1,mu,0],[mu,1,0],[0,0,(1-mu)/2]]) # Hooke's law for plane stress
 stiff = stiff.unsqueeze(0)
 
 # PINN requires super large number of iterations to converge (on the order of 50e^3-100e^3)
-iterations = 10
+iterations = config.iterations
 
 # Define loss function
 loss_func = nn.MSELoss()
 
 # Broadcast stiffness for batch multiplication later
 stiff_bc = stiff
+stiff_full = stiff
 stiff = torch.broadcast_to(stiff, (len(x),3,3))
-
 stiff_bc = torch.broadcast_to(stiff_bc, (len(Boundary),3,3))
+stiff_full = torch.broadcast_to(stiff_full, (len(x_full), 3, 3))
 
 params = list(stress_net.parameters()) + list(disp_net.parameters())
 
-# Define optimizer and scheduler
-optimizer = torch.optim.Adam(params, lr=1e-3)
+# Define optimizer and learning rate scheduler
+optimizer = torch.optim.Adam(params, lr=config.learning_rate)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.5)
 
+# Training loop
 for epoch in range(iterations):
     scheduler.step()
     optimizer.zero_grad()
@@ -118,9 +133,7 @@ for epoch in range(iterations):
     e_11 = dudx[:, 0].unsqueeze(1)
     e_22 = dvdx[:, 1].unsqueeze(1)
     e_12 = 0.5 * (dudx[:, 1] + dvdx[:, 0]).unsqueeze(1)
-
-    e = torch.cat((e_11,e_22,e_12), 1)
-    e = e.unsqueeze(2)
+    e = torch.cat((e_11, e_22, e_12), 1).unsqueeze(2)
 
     # Define augment stress
     sig_aug = torch.bmm(stiff, e).squeeze(2)
@@ -141,9 +154,7 @@ for epoch in range(iterations):
     e_11_bc = dudx_bc[:,0].unsqueeze(1)
     e_22_bc = dvdx_bc[:,1].unsqueeze(1)
     e_12_bc = 0.5 * (dudx_bc[:, 1] + dvdx_bc[:, 0]).unsqueeze(1)
-
-    e_bc = torch.cat((e_11_bc,e_22_bc,e_12_bc), 1)
-    e_bc = e_bc.unsqueeze(2)
+    e_bc = torch.cat((e_11_bc,e_22_bc,e_12_bc), 1).unsqueeze(2)
 
     sig_aug_bc = torch.bmm(stiff_bc, e_bc).squeeze(2)
 
@@ -172,8 +183,7 @@ for epoch in range(iterations):
     #========= Boundary Conditions ========================#
     # Prescribed tractions
     tau_R = 0.1  # Right boundary normal traction
-    tau_T = 0.0  # Top boundary (assumed zero)
-    
+    tau_T = 0.0  # Top boundary traction
     u_L = disp_net(L_boundary)
     u_B = disp_net(B_boundary)
     sig_R = stress_net(R_boundary)
@@ -214,19 +224,17 @@ for epoch in range(iterations):
     print('loss', loss.item(), 'iter', epoch)
     optimizer.step()
 
+    # Log training metrics to wandb
+    wandb.log({
+        "epoch": epoch,
+        "PDE_residual_loss": loss_eq1.item() + loss_eq2.item(),          # loss_eq1 + loss_eq2: PDE residual error (equilibrium)
+        "constitutive_loss": loss_cons.item() + loss_cons_bc.item(),        # loss_cons + loss_cons_bc: Constitutive loss (Hooke's law consistency)
+        "boundary_loss": (loss_BC_L.item() + loss_BC_B.item() + 
+                        loss_BC_R.item() + loss_BC_T.item() + loss_BC_C.item()),  # Boundary condition losses
+        "total_loss": loss.item()
+    })
+
 # Plot the stress field
-import matplotlib.tri as mtri
-
-stiff = E / (1 - mu ** 2) * torch.tensor([[1, mu, 0], [mu, 1, 0], [0, 0, (1 - mu) / 2]])
-stiff = stiff.unsqueeze(0)
-
-stiff_bc = stiff
-stiff_full = stiff
-stiff = torch.broadcast_to(stiff, (len(x), 3, 3))
-
-stiff_bc = torch.broadcast_to(stiff_bc, (len(Boundary), 3, 3))
-stiff_full = torch.broadcast_to(stiff_full, (len(x_full), 3, 3))
-
 u_full = disp_net(x_full)
 stress_full = stress_net(x_full)
 
@@ -259,4 +267,15 @@ plt.figure(2)
 plt.clf()
 plt.tricontourf(triang, sigma[:, 0].detach().numpy())
 plt.colorbar()
-plt.show()
+
+# Save the plot to the "results" directory instead of showing it
+os.makedirs('results', exist_ok=True)
+plt.savefig(os.path.join('results', 'contour_plot.png'))
+plt.close()
+
+# Optionally, save the model checkpoint and log it to wandb
+torch.save({
+    'stress_net': stress_net.state_dict(),
+    'disp_net': disp_net.state_dict(),
+}, os.path.join('results', 'model_checkpoint.pth'))
+wandb.save(os.path.join('results', 'model_checkpoint.pth'))
