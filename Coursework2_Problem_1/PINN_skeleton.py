@@ -30,7 +30,7 @@ class DenseNet(nn.Module):
 ############################# Data processing #############################
 # Read data from mat
 # Specify your data path here
-path = 'Coursework2_Problem_1/Plate_data.mat'
+path = 'Coursework2/Coursework2_Problem_1/Plate_data.mat'
 data = scipy.io.loadmat(path)
 torch.set_default_tensor_type(torch.DoubleTensor)
 L_boundary = torch.tensor(data['L_boundary'], dtype=torch.float64)
@@ -79,7 +79,7 @@ stiff = E/(1-mu**2)*torch.tensor([[1,mu,0],[mu,1,0],[0,0,(1-mu)/2]]) # Hooke's l
 stiff = stiff.unsqueeze(0)
 
 # PINN requires super large number of iterations to converge (on the order of 50e^3-100e^3)
-iterations = 50000
+iterations = 10
 
 # Define loss function
 loss_func = nn.MSELoss()
