@@ -7,10 +7,27 @@ import numpy as np
 from time import time
 import datetime
 import h5py
+import wandb
+from tqdm import tqdm
+
+# Initialize wandb
+wandb.init(project="Darcy_Flow", config={
+    "arch": "CNN",
+    "epochs": 100,
+    "batch_size": 20,
+    "learning_rate": 1e-3,
+    "channel_width": 64,
+    "scheduler_step": 50,
+    "scheduler_gamma": 0.9
+})
+config = wandb.config
 
 # Create results folder if it does not exist
 result_folder = 'Coursework2_Problem_2/results'
 os.makedirs(result_folder, exist_ok=True)
+
+# Set device to cuda if available
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Define Lp loss
 class LpLoss(object):
@@ -32,10 +49,7 @@ class LpLoss(object):
         h = 1.0 / (x.size()[1] - 1.0)
         all_norms = (h ** (self.d / self.p)) * torch.norm(x.view(num_examples, -1) - y.view(num_examples, -1), self.p, 1)
         if self.reduction:
-            if self.size_average:
-                return torch.mean(all_norms)
-            else:
-                return torch.sum(all_norms)
+            return torch.mean(all_norms) if self.size_average else torch.sum(all_norms)
         return all_norms
 
     def rel(self, x, y):
@@ -43,10 +57,7 @@ class LpLoss(object):
         diff_norms = torch.norm(x.reshape(num_examples, -1) - y.reshape(num_examples, -1), self.p, 1)
         y_norms = torch.norm(y.reshape(num_examples, -1), self.p, 1)
         if self.reduction:
-            if self.size_average:
-                return torch.mean(diff_norms / y_norms)
-            else:
-                return torch.sum(diff_norms / y_norms)
+            return torch.mean(diff_norms / y_norms) if self.size_average else torch.sum(diff_norms / y_norms)
         return diff_norms / y_norms
 
     def forward(self, x, y):
@@ -58,7 +69,7 @@ class LpLoss(object):
 # Define data reader
 class MatRead(object):
     def __init__(self, file_path):
-        super(MatRead).__init__()
+        super(MatRead, self).__init__()
         self.file_path = file_path
         self.data = h5py.File(self.file_path, 'r')
 
@@ -70,7 +81,7 @@ class MatRead(object):
         u_field = np.array(self.data['u_field']).T
         return torch.tensor(u_field, dtype=torch.float32)
     
-# Define normalizer, pointwise gaussian
+# Define normalizer, pointwise Gaussian
 class UnitGaussianNormalizer(object):
     def __init__(self, x, eps=1e-5):
         super(UnitGaussianNormalizer, self).__init__()
@@ -104,12 +115,10 @@ class CNN(nn.Module):
         x = x.unsqueeze(1)
         out = self.layers(x)
         # Remove the channel dimension before returning
-        out = out.squeeze(1)
-        return out
+        return out.squeeze(1)
 
 if __name__ == '__main__':
     ############################# Data Processing #############################
-    # Read data from .mat files
     train_path = 'Coursework2_Problem_2/Darcy_2D_data_train.mat'
     test_path = 'Coursework2_Problem_2/Darcy_2D_data_test.mat'
 
@@ -120,6 +129,10 @@ if __name__ == '__main__':
     data_reader = MatRead(test_path)
     a_test = data_reader.get_a()
     u_test = data_reader.get_u()
+
+    # Move raw data to device first
+    a_train, u_train = a_train.to(device), u_train.to(device)
+    a_test, u_test = a_test.to(device), u_test.to(device)
 
     # Normalize the data
     a_normalizer = UnitGaussianNormalizer(a_train)
@@ -136,35 +149,32 @@ if __name__ == '__main__':
     print("u_test:", u_test.shape)
 
     # Create DataLoader for training data
-    batch_size = 20
+    batch_size = config.batch_size
     train_set = Data.TensorDataset(a_train, u_train)
     train_loader = Data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
     ############################# Define and Train Network #############################
-    # Create RNN instance, define loss function and optimizer
-    channel_width = 64
-    net = CNN(channel_width=channel_width)
+    net = CNN(channel_width=config.channel_width).to(device)
     n_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print('Number of parameters: %d' % n_params)
 
-    # Define loss function, optimizer, and learning rate scheduler
     loss_func = LpLoss()
-    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.9)
+    optimizer = torch.optim.Adam(net.parameters(), lr=config.learning_rate)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config.scheduler_step, gamma=config.scheduler_gamma)
 
-    epochs = 20  # Number of epochs
-    print("Start training CNN for {} epochs...".format(epochs))
+    epochs = config.epochs
     start_time = time()
     
     loss_train_list = []
     loss_test_list = []
     epochs_list = []
     
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs), desc="Training epochs"):
         net.train()
         trainloss = 0
-        for i, data in enumerate(train_loader):
-            input, target = data
+        for input, target in train_loader:
+            # Move batch data to device
+            input, target = input.to(device), target.to(device)
             output = net(input) # Forward
             output = u_normalizer.decode(output)
             l = loss_func(output, target) # Calculate loss
@@ -187,10 +197,14 @@ if __name__ == '__main__':
         loss_train_list.append(avg_train_loss)
         loss_test_list.append(testloss)
         epochs_list.append(epoch)
-
-        if epoch % 10 == 0:
-            print("Epoch: {}, Train Loss: {:.5f}, Test Loss: {:.5f}".format(epoch, avg_train_loss, testloss))
-
+        
+        # Log metrics with wandb
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": avg_train_loss,
+            "test_loss": testloss
+        })
+    
     total_time = time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time: {}'.format(total_time_str))
@@ -207,44 +221,54 @@ if __name__ == '__main__':
     plt.legend()
     plt.grid(True)
     plt.title('Training and Test Loss vs. Epochs')
-    plt.savefig(os.path.join(result_folder, 'loss_plot.png'))
+    loss_plot_path = os.path.join(result_folder, 'loss_plot.png')
+    plt.savefig(loss_plot_path)
     plt.close()
+    # Log loss plot to wandb
+    wandb.log({"loss_plot": wandb.Image(loss_plot_path)})
     
     ############################# Contour Plots for a Single Test Sample #############################
     sample_index = 0
     sample_a = a_test[sample_index:sample_index+1]  # shape: (1, H, W)
-    sample_true = u_test[sample_index].numpy()       # shape: (H, W)
+    sample_true = u_test[sample_index].cpu().numpy()  # shape: (H, W)
     
     net.eval()
     with torch.no_grad():
         sample_pred = net(sample_a)
         sample_pred = u_normalizer.decode(sample_pred)
-    sample_pred = sample_pred.squeeze().numpy()
+    sample_pred = sample_pred.squeeze().cpu().numpy()
 
     # Create grid for contour plotting (assuming square domain)
     nx, ny = sample_true.shape
     x_coords = np.linspace(0, 1, nx)
     y_coords = np.linspace(0, 1, ny)
     X, Y = np.meshgrid(x_coords, y_coords)
-    
+
+    # Compute common vmin and vmax from both true and predicted data
+    vmin = min(sample_true.min(), sample_pred.min())
+    vmax = max(sample_true.max(), sample_pred.max())
+
     plt.figure(figsize=(12,5))
     
-    # True solution contour
+    # True solution contour with fixed color limits
     plt.subplot(1, 2, 1)
-    cp1 = plt.contourf(X, Y, sample_true, levels=20, cmap='viridis')
+    cp1 = plt.contourf(X, Y, sample_true, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp1)
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
     
-    # Predicted solution contour
+    # Predicted solution contour with fixed color limits
     plt.subplot(1, 2, 2)
-    cp2 = plt.contourf(X, Y, sample_pred, levels=20, cmap='viridis')
+    cp2 = plt.contourf(X, Y, sample_pred, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp2)
     plt.title('Predicted Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
     
     plt.tight_layout()
-    plt.savefig(os.path.join(result_folder, 'contour_plot.png'))
+    contour_plot_path = os.path.join(result_folder, 'contour_plot.png')
+    plt.savefig(contour_plot_path)
     plt.close()
+    # Log contour plot to wandb
+    wandb.log({"contour_plot": wandb.Image(contour_plot_path)})
