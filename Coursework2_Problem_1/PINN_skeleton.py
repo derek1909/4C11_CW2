@@ -13,10 +13,11 @@ wandb.init(project="Plate_PINN")
 
 # Log configuration parameters to wandb
 config = wandb.config
-config.learning_rate = 1e-3
-config.iterations = int(100)
-config.Disp_layer = [2, 300, 300, 2]
-config.Stress_layer = [2, 400, 400, 3]
+config.learning_rate = 3e-4
+config.measurementloss = True
+config.iterations = int(2e2)
+config.Disp_layer = [2, 500, 500, 500, 2]
+config.Stress_layer = [2, 500, 500, 500, 3]
 config.E = 10.0
 config.mu = 0.3
 
@@ -113,6 +114,8 @@ params = list(stress_net.parameters()) + list(disp_net.parameters())
 optimizer = torch.optim.Adam(params, lr=config.learning_rate)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.5)
 
+mse_loss_func = nn.MSELoss()
+
 # Training loop
 with tqdm(total=iterations, initial=0, desc="Training Epochs", unit="epoch") as pbar_epoch:
     for epoch in range(iterations):
@@ -208,19 +211,20 @@ with tqdm(total=iterations, initial=0, desc="Training Epochs", unit="epoch") as 
         loss_BC_C = loss_func(sig_C[:,0]*C_boundary[:,0]+sig_C[:,2]*C_boundary[:,1], torch.zeros_like(sig_C[:, 0]))  \
                     + loss_func(sig_C[:,2]*C_boundary[:,0]+sig_C[:,1]*C_boundary[:,1], torch.zeros_like(sig_C[:, 0]))
 
+        loss_fix = 0
+        if config.measurementloss:
+            x_fix = x_full[rand_index, :]
+            u_fix = disp_net(x_fix)
+            loss_fix = loss_func(u_fix,disp_fix)
+
         # Define the total loss function:
         # 1. loss_eq1 + loss_eq2: PDE residual error (equilibrium)
         # 2. loss_cons + loss_cons_bc: Constitutive loss (enforcing Hooke's law consistency)
         # 3. loss_BC_L + loss_BC_B + loss_BC_R + loss_BC_T + loss_BC_C: Boundary condition losses
+        # 4. 100*loss_fix: measurement loss
         loss = loss_eq1 + loss_eq2 + loss_cons + loss_cons_bc + \
-            loss_BC_L + loss_BC_B + loss_BC_R + loss_BC_T + loss_BC_C
-
-        # ======= Uncomment below for part (e) if additional data loss is used =======================
-        # data_loss_fix
-        #x_fix = x_full[rand_index, :]
-        #u_fix = disp_net(x_fix)
-        #loss_fix = loss_func(u_fix,disp_fix)
-        #loss = loss_eq1+loss_eq2+loss_cons+loss_BC_L+loss_BC_B+loss_BC_R+loss_BC_T+loss_BC_C+loss_cons_bc + 100*loss_fix
+                loss_BC_L + loss_BC_B + loss_BC_R + loss_BC_T + loss_BC_C + \
+                100*loss_fix
 
         loss.backward()
         optimizer.step()
@@ -233,60 +237,94 @@ with tqdm(total=iterations, initial=0, desc="Training Epochs", unit="epoch") as 
             "constitutive_loss": loss_cons.item() + loss_cons_bc.item(),        # loss_cons + loss_cons_bc: Constitutive loss (Hooke's law consistency)
             "boundary_loss": (loss_BC_L.item() + loss_BC_B.item() + 
                             loss_BC_R.item() + loss_BC_T.item() + loss_BC_C.item()),  # Boundary condition losses
+            "measurement_loss":  100*loss_fix,
             "total_loss": loss.item()
         })
-    
-        # Update progress bar
-        if (epoch + 1) % 10 == 0:
-            pbar_epoch.update(10)
-            pbar_epoch.set_postfix({"Total loss": f"{loss.item():.4e}"})
             
-# Plot the stress field
+        if (epoch + 1) % 10 == 0:
+            with torch.no_grad():
+                u_full_eval = disp_net(x_full)
+                mse_eval = mse_loss_func(u_full_eval, disp_truth)
+            wandb.log({"epoch": epoch + 1, "disp_mse": mse_eval.item()})
+            pbar_epoch.update(10)
+            pbar_epoch.set_postfix({"Total loss": f"{loss.item():.4e}", "Disp MSE": mse_eval.item()})
+# After training, evaluate the networks over all full domain points
 u_full = disp_net(x_full)
-stress_full = stress_net(x_full)
-
-xx = x_full[:,0].detach().cpu().numpy()
-yy = x_full[:,1].detach().cpu().numpy()
-sig11 = stress_full[:,1].detach().cpu().numpy()
-
-connect = (t_connect - 1).detach().cpu().numpy()
-
-triang = mtri.Triangulation(xx, yy, connect)
-
-u_11 = u_full[:,0].detach().cpu().numpy()
-
 u = u_full[:, 0]
 v = u_full[:, 1]
 
-# Compute gradients and stress field
+# Compute gradients with respect to the full collocation points
 dudx = torch.autograd.grad(u, x_full, grad_outputs=torch.ones_like(u), create_graph=True)[0]
 dvdx = torch.autograd.grad(v, x_full, grad_outputs=torch.ones_like(v), create_graph=True)[0]
 
+# Compute strain components
 e_11 = dudx[:, 0].unsqueeze(1)
 e_22 = dvdx[:, 1].unsqueeze(1)
 e_12 = 0.5 * (dudx[:, 1] + dvdx[:, 0]).unsqueeze(1)
 e = torch.cat((e_11, e_22, e_12), 1).unsqueeze(2)
-sigma = torch.bmm(stiff_full, e).squeeze(2)
 
-# Create and save the contour plot with colormap
-plt.figure(figsize=(8, 6))
-# Specify the colormap (here 'jet' is used to mimic MATLAB's jet colormap)
-contour = plt.tricontourf(triang, sigma[:, 0].detach().cpu().numpy(), cmap='jet')
-cb = plt.colorbar(contour)
-plt.title("Contour Plot of Sigma_11")
-plt.xlabel("X")
-plt.ylabel("Y")
+# Compute stresses using the constitutive law (Hooke's law)
+sigma_full_calc = torch.bmm(stiff_full, e).squeeze(2)
+sigma11 = sigma_full_calc[:, 0].detach().cpu().numpy()
+sigma22 = sigma_full_calc[:, 1].detach().cpu().numpy()
+sigma12 = sigma_full_calc[:, 2].detach().cpu().numpy()
 
-os.makedirs('results', exist_ok=True)
-plot_path = os.path.join('results', 'contour_plot.png')
+# For displacement, compute the magnitude
+u_np = u_full[:, 0].detach().cpu().numpy()
+v_np = u_full[:, 1].detach().cpu().numpy()
+disp_mag = np.sqrt(u_np**2 + v_np**2)
+
+# Get the coordinates for plotting
+xx = x_full[:, 0].detach().cpu().numpy()
+yy = x_full[:, 1].detach().cpu().numpy()
+connect = (t_connect - 1).detach().cpu().numpy()  # Adjust connectivity indices if needed
+triang = mtri.Triangulation(xx, yy, connect)
+
+# Create a 2x2 subplot for the four fields
+fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+cmap = 'jet'
+
+# Plot σ₁₁
+im0 = axs[0, 0].tripcolor(triang, sigma11, cmap=cmap, shading='flat')
+axs[0, 0].set_title("σ₁₁")
+axs[0, 0].set_xlabel("X")
+axs[0, 0].set_ylabel("Y")
+fig.colorbar(im0, ax=axs[0, 0])
+
+# Plot σ₂₂
+im1 = axs[0, 1].tripcolor(triang, sigma22, cmap=cmap, shading='flat')
+axs[0, 1].set_title("σ₂₂")
+axs[0, 1].set_xlabel("X")
+axs[0, 1].set_ylabel("Y")
+fig.colorbar(im1, ax=axs[0, 1])
+
+# Plot σ₁₂
+im2 = axs[1, 0].tripcolor(triang, sigma12, cmap=cmap, shading='flat')
+axs[1, 0].set_title("σ₁₂")
+axs[1, 0].set_xlabel("X")
+axs[1, 0].set_ylabel("Y")
+fig.colorbar(im2, ax=axs[1, 0])
+
+# Plot displacement magnitude
+im3 = axs[1, 1].tripcolor(triang, disp_mag, cmap=cmap, shading='flat')
+axs[1, 1].set_title("Displacement Magnitude")
+axs[1, 1].set_xlabel("X")
+axs[1, 1].set_ylabel("Y")
+fig.colorbar(im3, ax=axs[1, 1])
+
+plt.tight_layout()
+
+os.makedirs('./Coursework2_Problem_1/results', exist_ok=True)
+plot_path = os.path.join('./Coursework2_Problem_1/results', 'predicted_plot.png')
 plt.savefig(plot_path)
 plt.close()
 
+
 # Log the contour plot image to wandb
-wandb.log({"contour_plot": wandb.Image(plot_path)})
+wandb.log({"predicted_stress_plot": wandb.Image(plot_path)})
 
 # Optionally, save the model checkpoint and log it to wandb
-checkpoint_path = os.path.join('results', 'model_checkpoint.pth')
+checkpoint_path = os.path.join('./Coursework2_Problem_1/results', 'model_checkpoint.pth')
 torch.save({
     'stress_net': stress_net.state_dict(),
     'disp_net': disp_net.state_dict(),
