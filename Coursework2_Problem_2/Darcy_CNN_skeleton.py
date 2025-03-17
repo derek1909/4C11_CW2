@@ -4,26 +4,25 @@ import torch
 import torch.nn as nn
 import torch.utils.data as Data
 import numpy as np
-from time import time
-import datetime
 import h5py
+import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
 
 # Initialize wandb
 wandb.init(project="Darcy_Flow", config={
     "arch": "CNN",
-    "epochs": 100,
-    "batch_size": 20,
-    "learning_rate": 1e-3,
+    "epochs": 500,
+    "batch_size": 10,
+    "learning_rate": 1e-4,
     "channel_width": 64,
-    "scheduler_step": 50,
-    "scheduler_gamma": 0.9
+    "scheduler_step": 200,
+    "scheduler_gamma": 0.5
 })
 config = wandb.config
 
 # Create results folder if it does not exist
-result_folder = 'Coursework2_Problem_2/results'
+result_folder = 'Coursework2_Problem_2/CNN_results'
 os.makedirs(result_folder, exist_ok=True)
 
 # Set device to cuda if available
@@ -80,8 +79,8 @@ class MatRead(object):
     def get_u(self):
         u_field = np.array(self.data['u_field']).T
         return torch.tensor(u_field, dtype=torch.float32)
-    
-# Define normalizer, pointwise Gaussian
+
+# Define normalizer, pointwise gaussian
 class UnitGaussianNormalizer(object):
     def __init__(self, x, eps=1e-5):
         super(UnitGaussianNormalizer, self).__init__()
@@ -118,7 +117,8 @@ class CNN(nn.Module):
         return out.squeeze(1)
 
 if __name__ == '__main__':
-    ############################# Data Processing #############################
+    ############################# Data processing #############################
+    # Read data from .mat files
     train_path = 'Coursework2_Problem_2/Darcy_2D_data_train.mat'
     test_path = 'Coursework2_Problem_2/Darcy_2D_data_test.mat'
 
@@ -140,126 +140,104 @@ if __name__ == '__main__':
     a_test = a_normalizer.encode(a_test)
 
     u_normalizer = UnitGaussianNormalizer(u_train)
-    u_train = u_normalizer.encode(u_train)
-    u_test = u_normalizer.encode(u_test)
 
-    print("a_train:", a_train.shape)
-    print("u_train:", u_train.shape)
-    print("a_test:", a_test.shape)
-    print("u_test:", u_test.shape)
-
-    # Create DataLoader for training data
-    batch_size = config.batch_size
+    # Create data loader
     train_set = Data.TensorDataset(a_train, u_train)
-    train_loader = Data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
-
-    ############################# Define and Train Network #############################
+    train_loader = Data.DataLoader(train_set, batch_size=config.batch_size, shuffle=True)
+    
+    ############################# Define and train network #############################
     net = CNN(channel_width=config.channel_width).to(device)
     n_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print('Number of parameters: %d' % n_params)
-
+    
     loss_func = LpLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=config.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config.scheduler_step, gamma=config.scheduler_gamma)
-
+    
     epochs = config.epochs
-    start_time = time()
     
     loss_train_list = []
     loss_test_list = []
-    epochs_list = []
+    epoch_list = []
     
-    for epoch in tqdm(range(epochs), desc="Training epochs"):
-        net.train()
-        trainloss = 0
-        for input, target in train_loader:
-            # Move batch data to device
-            input, target = input.to(device), target.to(device)
-            output = net(input) # Forward
-            output = u_normalizer.decode(output)
-            l = loss_func(output, target) # Calculate loss
+    # Training loop with tqdm
+    with tqdm(total=epochs, initial=0, desc="Training", unit="epoch", dynamic_ncols=True) as pbar_epoch:
+        for epoch in range(epochs):
+            net.train()
+            train_loss = 0
+            for input, target in train_loader:
+                input, target = input.to(device), target.to(device)
+                output = net(input) # Forward
+                output = u_normalizer.decode(output)
+                l = loss_func(output, target) # Calculate loss
 
-            optimizer.zero_grad() # Clear gradients
-            l.backward() # Backward
-            optimizer.step() # Update parameters
-            scheduler.step() # Update learning rate
+                optimizer.zero_grad() # Clear gradients
+                l.backward() # Backward
+                optimizer.step() # Update parameters
+                scheduler.step() # Update learning rate
 
-            trainloss += l.item()
+                train_loss += l.item()
+            # Evaluation
+            net.eval()
+            with torch.no_grad():
+                test_output = net(a_test.to(device))
+                test_output = u_normalizer.decode(test_output)
+                test_loss = loss_func(test_output, u_test.to(device)).item()
+            avg_train_loss = train_loss / len(train_loader)
+            loss_train_list.append(avg_train_loss)
+            loss_test_list.append(test_loss)
+            epoch_list.append(epoch)
+            wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "test_loss": test_loss})
+
+            pbar_epoch.update(1)
+            pbar_epoch.set_postfix({"Train Loss": f"{avg_train_loss:.3e}", "Test Loss": f"{test_loss:.3e}"})
     
-        # Evaluate on test data
-        net.eval()
-        with torch.no_grad():
-            test_output = net(a_test)
-            test_output = u_normalizer.decode(test_output)
-            testloss = loss_func(test_output, u_test).item()
-
-        avg_train_loss = trainloss / len(train_loader)
-        loss_train_list.append(avg_train_loss)
-        loss_test_list.append(testloss)
-        epochs_list.append(epoch)
-        
-        # Log metrics with wandb
-        wandb.log({
-            "epoch": epoch,
-            "train_loss": avg_train_loss,
-            "test_loss": testloss
-        })
-    
-    total_time = time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time: {}'.format(total_time_str))
     print("Final Train Loss: {:.5f}".format(loss_train_list[-1]))
     print("Final Test Loss: {:.5f}".format(loss_test_list[-1]))
     
-    ############################# Plot Loss Curves #############################
+    ############################# Save Loss Curves #############################
     plt.figure(figsize=(8,5))
-    plt.plot(epochs_list, loss_train_list, label='Train Loss')
-    plt.plot(epochs_list, loss_test_list, label='Test Loss')
+    plt.plot(epoch_list, loss_train_list, label='Train Loss')
+    plt.plot(epoch_list, loss_test_list, label='Test Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.ylim(0, max(max(loss_train_list), max(loss_test_list))*1.1)
     plt.legend()
     plt.grid(True)
     plt.title('Training and Test Loss vs. Epochs')
     loss_plot_path = os.path.join(result_folder, 'loss_plot.png')
     plt.savefig(loss_plot_path)
     plt.close()
-    # Log loss plot to wandb
     wandb.log({"loss_plot": wandb.Image(loss_plot_path)})
     
     ############################# Contour Plots for a Single Test Sample #############################
     sample_index = 0
     sample_a = a_test[sample_index:sample_index+1]  # shape: (1, H, W)
-    sample_true = u_test[sample_index].cpu().numpy()  # shape: (H, W)
+    sample_true = u_test[sample_index].cpu().numpy()   # shape: (H, W)
     
     net.eval()
     with torch.no_grad():
-        sample_pred = net(sample_a)
+        sample_pred = net(sample_a.to(device))
         sample_pred = u_normalizer.decode(sample_pred)
     sample_pred = sample_pred.squeeze().cpu().numpy()
-
-    # Create grid for contour plotting (assuming square domain)
+    
     nx, ny = sample_true.shape
     x_coords = np.linspace(0, 1, nx)
     y_coords = np.linspace(0, 1, ny)
     X, Y = np.meshgrid(x_coords, y_coords)
-
-    # Compute common vmin and vmax from both true and predicted data
+    
+    # Use common color limits
     vmin = min(sample_true.min(), sample_pred.min())
     vmax = max(sample_true.max(), sample_pred.max())
-
-    plt.figure(figsize=(12,5))
     
-    # True solution contour with fixed color limits
-    plt.subplot(1, 2, 1)
+    plt.figure(figsize=(12,5))
+    plt.subplot(1,2,1)
     cp1 = plt.contourf(X, Y, sample_true, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp1)
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
     
-    # Predicted solution contour with fixed color limits
-    plt.subplot(1, 2, 2)
+    plt.subplot(1,2,2)
     cp2 = plt.contourf(X, Y, sample_pred, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp2)
     plt.title('Predicted Solution $u(x)$')
@@ -270,5 +248,4 @@ if __name__ == '__main__':
     contour_plot_path = os.path.join(result_folder, 'contour_plot.png')
     plt.savefig(contour_plot_path)
     plt.close()
-    # Log contour plot to wandb
     wandb.log({"contour_plot": wandb.Image(contour_plot_path)})
