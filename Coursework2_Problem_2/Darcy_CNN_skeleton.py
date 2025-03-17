@@ -12,12 +12,7 @@ from tqdm import tqdm
 # Initialize wandb
 wandb.init(project="Darcy_Flow", config={
     "arch": "CNN",
-    "epochs": 500,
-    "batch_size": 10,
-    "learning_rate": 1e-4,
-    "channel_width": 64,
-    "scheduler_step": 200,
-    "scheduler_gamma": 0.5
+    "do_train": True
 })
 config = wandb.config
 
@@ -155,60 +150,69 @@ if __name__ == '__main__':
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config.scheduler_step, gamma=config.scheduler_gamma)
     
     epochs = config.epochs
-    
-    loss_train_list = []
-    loss_test_list = []
-    epoch_list = []
-    
-    # Training loop with tqdm
-    with tqdm(total=epochs, initial=0, desc="Training", unit="epoch", dynamic_ncols=True) as pbar_epoch:
-        for epoch in range(epochs):
-            net.train()
-            train_loss = 0
-            for input, target in train_loader:
-                input, target = input.to(device), target.to(device)
-                output = net(input) # Forward
-                output = u_normalizer.decode(output)
-                l = loss_func(output, target) # Calculate loss
 
-                optimizer.zero_grad() # Clear gradients
-                l.backward() # Backward
-                optimizer.step() # Update parameters
-                scheduler.step() # Update learning rate
+    model_weights_path = os.path.join(result_folder, 'fno_model.pth')
+    if config.do_train:
+        loss_train_list = []
+        loss_test_list = []
+        epoch_list = []
+        
+        # Training loop with tqdm
+        with tqdm(total=epochs, initial=0, desc="Training", unit="epoch", dynamic_ncols=True) as pbar_epoch:
+            for epoch in range(epochs):
+                net.train()
+                train_loss = 0
+                for input, target in train_loader:
+                    input, target = input.to(device), target.to(device)
+                    output = net(input) # Forward
+                    output = u_normalizer.decode(output)
+                    l = loss_func(output, target) # Calculate loss
 
-                train_loss += l.item()
-            # Evaluation
-            net.eval()
-            with torch.no_grad():
-                test_output = net(a_test.to(device))
-                test_output = u_normalizer.decode(test_output)
-                test_loss = loss_func(test_output, u_test.to(device)).item()
-            avg_train_loss = train_loss / len(train_loader)
-            loss_train_list.append(avg_train_loss)
-            loss_test_list.append(test_loss)
-            epoch_list.append(epoch)
-            wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "test_loss": test_loss})
+                    optimizer.zero_grad() # Clear gradients
+                    l.backward() # Backward
+                    optimizer.step() # Update parameters
+                    scheduler.step() # Update learning rate
 
-            pbar_epoch.update(1)
-            pbar_epoch.set_postfix({"Train Loss": f"{avg_train_loss:.3e}", "Test Loss": f"{test_loss:.3e}"})
-    
-    print("Final Train Loss: {:.5f}".format(loss_train_list[-1]))
-    print("Final Test Loss: {:.5f}".format(loss_test_list[-1]))
-    
-    ############################# Save Loss Curves #############################
-    plt.figure(figsize=(8,5))
-    plt.plot(epoch_list, loss_train_list, label='Train Loss')
-    plt.plot(epoch_list, loss_test_list, label='Test Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.title('Training and Test Loss vs. Epochs')
-    loss_plot_path = os.path.join(result_folder, 'loss_plot.png')
-    plt.savefig(loss_plot_path)
-    plt.close()
-    wandb.log({"loss_plot": wandb.Image(loss_plot_path)})
-    
+                    train_loss += l.item()
+                # Evaluation
+                net.eval()
+                with torch.no_grad():
+                    test_output = net(a_test.to(device))
+                    test_output = u_normalizer.decode(test_output)
+                    test_loss = loss_func(test_output, u_test.to(device)).item()
+                avg_train_loss = train_loss / len(train_loader)
+                loss_train_list.append(avg_train_loss)
+                loss_test_list.append(test_loss)
+                epoch_list.append(epoch)
+                wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "test_loss": test_loss})
+
+                pbar_epoch.update(1)
+                pbar_epoch.set_postfix({"Train Loss": f"{avg_train_loss:.3e}", "Test Loss": f"{test_loss:.3e}"})
+        
+        print("Final Train Loss: {:.5f}".format(loss_train_list[-1]))
+        print("Final Test Loss: {:.5f}".format(loss_test_list[-1]))
+
+        # Save model weights
+        torch.save(net.state_dict(), model_weights_path)
+        print(f"Model weights saved to {model_weights_path}")
+
+        ############################# Save Loss Curves #############################
+        plt.figure(figsize=(8,5))
+        plt.plot(epoch_list, loss_train_list, label='Train Loss')
+        plt.plot(epoch_list, loss_test_list, label='Test Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        plt.title('Training and Test Loss vs. Epochs')
+        loss_plot_path = os.path.join(result_folder, 'loss_plot.png')
+        plt.savefig(loss_plot_path)
+        plt.close()
+        wandb.log({"loss_plot": wandb.Image(loss_plot_path)})
+        
+    else:
+        net.load_state_dict(torch.load(model_weights_path, map_location=device))
+        print(f"Model weights loaded from {model_weights_path}")
     ############################# Contour Plots for a Single Test Sample #############################
     sample_index = 0
     sample_a = a_test[sample_index:sample_index+1]  # shape: (1, H, W)
