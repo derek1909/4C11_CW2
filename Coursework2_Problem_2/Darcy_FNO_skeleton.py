@@ -259,18 +259,10 @@ if __name__ == '__main__':
     a_test = a_normalizer.encode(a_test)
 
     u_normalizer = UnitGaussianNormalizer(u_train)
-    u_train = u_normalizer.encode(u_train)
-    u_test = u_normalizer.encode(u_test)
-
-    print("a_train:", a_train.shape)
-    print("a_test:", a_test.shape)
-    print("u_train:", u_train.shape)
-    print("u_test:", u_test.shape)
 
     # Create data loader
-    batch_size = 20
     train_set = Data.TensorDataset(a_train, u_train)
-    train_loader = Data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    train_loader = Data.DataLoader(train_set, batch_size=config.batch_size, shuffle=True)
     
     ############################# Define and train network #############################
     modes = config.modes
@@ -290,32 +282,36 @@ if __name__ == '__main__':
     epoch_list = []
     
     # Training loop with tqdm
-    for epoch in tqdm(range(epochs), desc="Training epochs"):
-        net.train()
-        train_loss = 0
-        for input, target in train_loader:
-            input, target = input.to(device), target.to(device)
-            output = net(input) # Forward
-            output = u_normalizer.decode(output)
-            l = loss_func(output, target) # Calculate loss
+    with tqdm(total=epochs, initial=0, desc="Training", unit="epoch", dynamic_ncols=True) as pbar_epoch:
+        for epoch in range(epochs):
+            net.train()
+            train_loss = 0
+            for input, target in train_loader:
+                input, target = input.to(device), target.to(device)
+                output = net(input) # Forward
+                output = u_normalizer.decode(output)
+                l = loss_func(output, target) # Calculate loss
 
-            optimizer.zero_grad() # Clear gradients
-            l.backward() # Backward
-            optimizer.step() # Update parameters
-            scheduler.step() # Update learning rate
+                optimizer.zero_grad() # Clear gradients
+                l.backward() # Backward
+                optimizer.step() # Update parameters
+                scheduler.step() # Update learning rate
 
-            train_loss += l.item()
-        # Evaluation
-        net.eval()
-        with torch.no_grad():
-            test_output = net(a_test.to(device))
-            test_output = u_normalizer.decode(test_output)
-            test_loss = loss_func(test_output, u_test.to(device)).item()
-        avg_train_loss = train_loss / len(train_loader)
-        loss_train_list.append(avg_train_loss)
-        loss_test_list.append(test_loss)
-        epoch_list.append(epoch)
-        wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "test_loss": test_loss})
+                train_loss += l.item()
+            # Evaluation
+            net.eval()
+            with torch.no_grad():
+                test_output = net(a_test.to(device))
+                test_output = u_normalizer.decode(test_output)
+                test_loss = loss_func(test_output, u_test.to(device)).item()
+            avg_train_loss = train_loss / len(train_loader)
+            loss_train_list.append(avg_train_loss)
+            loss_test_list.append(test_loss)
+            epoch_list.append(epoch)
+            wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "test_loss": test_loss})
+
+            pbar_epoch.update(1)
+            pbar_epoch.set_postfix({"Train Loss": f"{avg_train_loss:.3e}", "Test Loss": f"{test_loss:.3e}"})
     
     print("Final Train Loss: {:.5f}".format(loss_train_list[-1]))
     print("Final Test Loss: {:.5f}".format(loss_test_list[-1]))
@@ -326,6 +322,7 @@ if __name__ == '__main__':
     plt.plot(epoch_list, loss_test_list, label='Test Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    plt.ylim(0, max(max(loss_train_list), max(loss_test_list))*1.1)
     plt.legend()
     plt.grid(True)
     plt.title('Training and Test Loss vs. Epochs')
@@ -353,22 +350,36 @@ if __name__ == '__main__':
     # Use common color limits
     vmin = min(sample_true.min(), sample_pred.min())
     vmax = max(sample_true.max(), sample_pred.max())
-    
-    plt.figure(figsize=(12,5))
-    plt.subplot(1,2,1)
+
+    # Abs Diff
+    abs_diff = np.abs(sample_true - sample_pred)
+
+    plt.figure(figsize=(18,5))
+
+    # True
+    plt.subplot(1,3,1)
     cp1 = plt.contourf(X, Y, sample_true, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp1)
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
-    
-    plt.subplot(1,2,2)
+
+    # Pred
+    plt.subplot(1,3,2)
     cp2 = plt.contourf(X, Y, sample_pred, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp2)
     plt.title('Predicted Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
-    
+
+    # Diff
+    plt.subplot(1,3,3)
+    cp3 = plt.imshow(abs_diff, cmap='viridis', extent=[0,1,0,1], origin='lower')
+    plt.colorbar(cp3)
+    plt.title('Absolute Difference')
+    plt.xlabel('x')
+    plt.ylabel('y')
+
     plt.tight_layout()
     contour_plot_path = os.path.join(result_folder, 'contour_plot.png')
     plt.savefig(contour_plot_path)

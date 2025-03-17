@@ -228,22 +228,36 @@ if __name__ == '__main__':
     # Use common color limits
     vmin = min(sample_true.min(), sample_pred.min())
     vmax = max(sample_true.max(), sample_pred.max())
-    
-    plt.figure(figsize=(12,5))
-    plt.subplot(1,2,1)
+
+    # Abs Diff
+    abs_diff = np.abs(sample_true - sample_pred)
+
+    plt.figure(figsize=(18,5))
+
+    # True
+    plt.subplot(1,3,1)
     cp1 = plt.contourf(X, Y, sample_true, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp1)
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
-    
-    plt.subplot(1,2,2)
+
+    # Pred
+    plt.subplot(1,3,2)
     cp2 = plt.contourf(X, Y, sample_pred, levels=20, cmap='viridis', vmin=vmin, vmax=vmax)
     plt.colorbar(cp2)
     plt.title('Predicted Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
-    
+
+    # Diff
+    plt.subplot(1,3,3)
+    cp3 = plt.imshow(abs_diff, cmap='viridis', extent=[0,1,0,1], origin='lower')
+    plt.colorbar(cp3)
+    plt.title('Absolute Difference')
+    plt.xlabel('x')
+    plt.ylabel('y')
+
     plt.tight_layout()
     contour_plot_path = os.path.join(result_folder, 'contour_plot.png')
     plt.savefig(contour_plot_path)
