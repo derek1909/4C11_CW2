@@ -8,21 +8,23 @@ import scipy.io
 import matplotlib.tri as mtri
 from tqdm import tqdm
 
-# Initialize wandb project (replace "Plate_PINN" and "your_username" with your project name and wandb username)
+# Initialize wandb project
 wandb.init(project="Plate_PINN")
 
 # Log configuration parameters to wandb
 config = wandb.config
-config.learning_rate = 3e-4
-config.measurementloss = True
-config.iterations = int(2e2)
-config.Disp_layer = [2, 500, 500, 500, 2]
-config.Stress_layer = [2, 500, 500, 500, 3]
+config.learning_rate = 1e-3
+config.measurementloss = False
+config.iterations = int(5e2)
+config.Disp_layer = [2, 300, 300, 2]
+config.Stress_layer = [2, 400, 400, 3]
 config.E = 10.0
 config.mu = 0.3
+config.scheduler_step = 8000
+config.scheduler_gamma = 0.6
 
 # ------------------------- Added for CUDA -------------------------
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 # --------------------------------------------------------------------
 
 # Define the DenseNet neural network
@@ -112,12 +114,24 @@ params = list(stress_net.parameters()) + list(disp_net.parameters())
 
 # Define optimizer and learning rate scheduler
 optimizer = torch.optim.Adam(params, lr=config.learning_rate)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config.scheduler_step, gamma=config.scheduler_gamma)
 
 mse_loss_func = nn.MSELoss()
 
+# Create directory for saving results if it doesn't exist
+os.makedirs('./Coursework2_Problem_1/results', exist_ok=True)
+
+# Lists to store loss metrics for plotting
+loss_epochs = []
+loss_pde = []
+loss_constitutive = []
+loss_boundary = []
+loss_measurement = []
+loss_total = []
+loss_disp_mse = []
+
 # Training loop
-with tqdm(total=iterations, initial=0, desc="Training Epochs", unit="epoch") as pbar_epoch:
+with tqdm(total=iterations, initial=0, desc="Training", unit="epoch", dynamic_ncols=True) as pbar_epoch:
     for epoch in range(iterations):
         optimizer.zero_grad()
 
@@ -230,24 +244,60 @@ with tqdm(total=iterations, initial=0, desc="Training Epochs", unit="epoch") as 
         optimizer.step()
         scheduler.step()
 
-        # Log training metrics to wandb
-        wandb.log({
-            "epoch": epoch,
-            "PDE_residual_loss": loss_eq1.item() + loss_eq2.item(),          # loss_eq1 + loss_eq2: PDE residual error (equilibrium)
-            "constitutive_loss": loss_cons.item() + loss_cons_bc.item(),        # loss_cons + loss_cons_bc: Constitutive loss (Hooke's law consistency)
-            "boundary_loss": (loss_BC_L.item() + loss_BC_B.item() + 
-                            loss_BC_R.item() + loss_BC_T.item() + loss_BC_C.item()),  # Boundary condition losses
-            "measurement_loss":  100*loss_fix,
-            "total_loss": loss.item()
-        })
-            
-        if (epoch + 1) % 10 == 0:
-            with torch.no_grad():
-                u_full_eval = disp_net(x_full)
-                mse_eval = mse_loss_func(u_full_eval, disp_truth)
-            wandb.log({"epoch": epoch + 1, "disp_mse": mse_eval.item()})
-            pbar_epoch.update(10)
-            pbar_epoch.set_postfix({"Total loss": f"{loss.item():.4e}", "Disp MSE": mse_eval.item()})
+        if epoch % 20 == 0:
+            u_full_eval = disp_net(x_full)
+            mse_eval = mse_loss_func(u_full_eval, disp_truth)
+            pde_loss_val = loss_eq1.item() + loss_eq2.item()
+            constitutive_loss_val = loss_cons.item() + loss_cons_bc.item()
+            boundary_loss_val = (loss_BC_L.item() + loss_BC_B.item() +
+                                 loss_BC_R.item() + loss_BC_T.item() + loss_BC_C.item())
+            measurement_loss_val = 100 * loss_fix
+
+            wandb.log({
+                "epoch": epoch,
+                "PDE_residual_loss": pde_loss_val,
+                "constitutive_loss": constitutive_loss_val,
+                "boundary_loss": boundary_loss_val,
+                "measurement_loss": measurement_loss_val,
+                "total_loss": loss.item(),
+                "disp_mse": mse_eval.item()
+            })
+
+            # Record losses in lists for plotting later
+            loss_epochs.append(epoch)
+            loss_pde.append(pde_loss_val)
+            loss_constitutive.append(constitutive_loss_val)
+            loss_boundary.append(boundary_loss_val)
+            loss_measurement.append(measurement_loss_val)
+            loss_total.append(loss.item())
+            loss_disp_mse.append(mse_eval.item())
+
+            pbar_epoch.update(20)
+            pbar_epoch.set_postfix({"Total Loss": f"{loss.item():.3e}", "Disp MSE": f"{mse_eval.item():.3e}"})
+
+# After training, create a log-scale plot of all loss values
+plt.figure(figsize=(10, 6))
+plt.plot(loss_epochs, loss_total, label='Total Loss', linewidth=2)
+plt.plot(loss_epochs, loss_pde, label='PDE Residual Loss')
+plt.plot(loss_epochs, loss_constitutive, label='Constitutive Loss')
+plt.plot(loss_epochs, loss_boundary, label='Boundary Loss')
+plt.plot(loss_epochs, loss_measurement, label='Measurement Loss')
+plt.plot(loss_epochs, loss_disp_mse, label='Displacement MSE',linestyle='--')
+plt.yscale('log')
+plt.xlabel("Iterations")
+plt.ylabel("Loss (log scale)")
+plt.title("Loss History (Log Scale)")
+plt.legend()
+plt.grid(True)
+
+# Save the plot locally
+loss_plot_path = os.path.join('./Coursework2_Problem_1/results', 'loss_history_log.png')
+plt.savefig(loss_plot_path)
+plt.close()
+
+# Log the loss plot image to wandb
+wandb.log({"loss_history_log": wandb.Image(loss_plot_path)})
+
 # After training, evaluate the networks over all full domain points
 u_full = disp_net(x_full)
 u = u_full[:, 0]
@@ -280,41 +330,17 @@ yy = x_full[:, 1].detach().cpu().numpy()
 connect = (t_connect - 1).detach().cpu().numpy()  # Adjust connectivity indices if needed
 triang = mtri.Triangulation(xx, yy, connect)
 
-# Create a 2x2 subplot for the four fields
-fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+# Create a plot for σ11
+fig, ax = plt.subplots(figsize=(6, 5))
 cmap = 'jet'
-
-# Plot σ₁₁
-im0 = axs[0, 0].tripcolor(triang, sigma11, cmap=cmap, shading='flat')
-axs[0, 0].set_title("σ₁₁")
-axs[0, 0].set_xlabel("X")
-axs[0, 0].set_ylabel("Y")
-fig.colorbar(im0, ax=axs[0, 0])
-
-# Plot σ₂₂
-im1 = axs[0, 1].tripcolor(triang, sigma22, cmap=cmap, shading='flat')
-axs[0, 1].set_title("σ₂₂")
-axs[0, 1].set_xlabel("X")
-axs[0, 1].set_ylabel("Y")
-fig.colorbar(im1, ax=axs[0, 1])
-
-# Plot σ₁₂
-im2 = axs[1, 0].tripcolor(triang, sigma12, cmap=cmap, shading='flat')
-axs[1, 0].set_title("σ₁₂")
-axs[1, 0].set_xlabel("X")
-axs[1, 0].set_ylabel("Y")
-fig.colorbar(im2, ax=axs[1, 0])
-
-# Plot displacement magnitude
-im3 = axs[1, 1].tripcolor(triang, disp_mag, cmap=cmap, shading='flat')
-axs[1, 1].set_title("Displacement Magnitude")
-axs[1, 1].set_xlabel("X")
-axs[1, 1].set_ylabel("Y")
-fig.colorbar(im3, ax=axs[1, 1])
-
+im = ax.tripcolor(triang, sigma11, cmap=cmap, shading='flat')
+ax.set_title("σ₁₁")
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+fig.colorbar(im, ax=ax)
 plt.tight_layout()
 
-os.makedirs('./Coursework2_Problem_1/results', exist_ok=True)
+os.makedirs(f'./Coursework2_Problem_1/results', exist_ok=True)
 plot_path = os.path.join('./Coursework2_Problem_1/results', 'predicted_plot.png')
 plt.savefig(plot_path)
 plt.close()
