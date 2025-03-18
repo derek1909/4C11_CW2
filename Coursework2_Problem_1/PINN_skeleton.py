@@ -7,6 +7,7 @@ import numpy as np
 import scipy.io
 import matplotlib.tri as mtri
 from tqdm import tqdm
+import yaml
 
 # Initialize wandb project
 wandb.init(project="Plate_PINN")
@@ -14,20 +15,18 @@ wandb.init(project="Plate_PINN")
 # Log configuration parameters to wandb
 config = wandb.config
 config.learning_rate = 3e-4
-config.measurementloss = False
+config.measurementloss = True
 config.iterations = int(1e5)
 config.Disp_layer = [2, 300, 300, 2]
 config.Stress_layer = [2, 400, 400, 3]
 config.E = 10.0
 config.mu = 0.3
-config.scheduler_step = 3000
-config.scheduler_gamma = 0.8
-config.do_train = True
-# --------------------------------------------------------------------
+config.scheduler_step = 2000
+config.scheduler_gamma = 0.75
+config.do_train = False
 
-# ------------------------- Added for CUDA -------------------------
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-# --------------------------------------------------------------------
+gpu_id = 0 if config.measurementloss else 1
+device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
 # Define the DenseNet neural network
 class DenseNet(nn.Module):
@@ -123,6 +122,8 @@ mse_loss_func = nn.MSELoss()
 # Create directory for saving results if it doesn't exist
 results_folder = f'./Coursework2_Problem_1/results/enhanced_{config.measurementloss}'
 os.makedirs(results_folder, exist_ok=True)
+yaml_path = os.path.join(results_folder, "training_history.yaml")
+
 
 # Lists to store loss metrics for plotting
 loss_epochs = []
@@ -283,29 +284,20 @@ if config.do_train:
                 pbar_epoch.update(20)
                 pbar_epoch.set_postfix({"Total Loss": f"{loss.item():.3e}", "Disp MSE": f"{mse_eval.item():.3e}"})
 
+    history = {
+        "epoch": loss_epochs,
+        "PDE_residual_loss": loss_pde,
+        "constitutive_loss": loss_constitutive,
+        "boundary_loss": loss_boundary,
+        "measurement_loss": loss_measurement,
+        "total_loss": loss_total,
+        "disp_mse": loss_disp_mse
+    }
 
-    # After training, create a log-scale plot of all loss values
-    plt.figure(figsize=(10, 6))
-    plt.plot(loss_epochs, loss_total, label='Total Loss', linewidth=2)
-    plt.plot(loss_epochs, loss_pde, label='PDE Residual Loss',linestyle='--')
-    plt.plot(loss_epochs, loss_constitutive, label='Constitutive Loss',linestyle='--')
-    plt.plot(loss_epochs, loss_boundary, label='Boundary Loss',linestyle='--')
-    plt.plot(loss_epochs, loss_measurement, label='Measurement Loss',linestyle='--')
-    plt.plot(loss_epochs, loss_disp_mse, label='Displacement MSE', linewidth=2)
-    plt.yscale('log')
-    plt.xlabel("Iterations")
-    plt.ylabel("Loss (log scale)")
-    plt.title("Loss History (Log Scale)")
-    plt.legend()
-    plt.grid(True)
+    with open(yaml_path, "w") as f:
+        yaml.dump(history, f)
 
-    # Save the plot locally
-    loss_plot_path = os.path.join(results_folder, 'loss_history_log.png')
-    plt.savefig(loss_plot_path)
-    plt.close()
-
-    # Log the loss plot image to wandb
-    wandb.log({"loss_history_log": wandb.Image(loss_plot_path)})
+    print(f"Training history saved to {yaml_path}")
 
     # Save the model checkpoint after training
     checkpoint_path = os.path.join(results_folder, 'model_checkpoint.pth')
@@ -327,7 +319,44 @@ else:
     else:
         raise FileNotFoundError("Checkpoint not found. Please train the model first or check the checkpoint path.")
 
+    with open(yaml_path, "r") as f:
+        history_loaded = yaml.safe_load(f)
+
+    epochs = history_loaded["epoch"]
+    pde_loss = history_loaded["PDE_residual_loss"]
+    constitutive_loss = history_loaded["constitutive_loss"]
+    boundary_loss = history_loaded["boundary_loss"]
+    measurement_loss = history_loaded["measurement_loss"]
+    total_loss = history_loaded["total_loss"]
+    disp_mse = history_loaded["disp_mse"]  
+
 # ------------------------- EVALUATION AND PLOTTING -------------------------
+
+
+# After training, create a log-scale plot of all loss values
+plt.figure(figsize=(10, 6))
+plt.plot(loss_epochs, loss_total, label='Total Loss', linewidth=2)
+plt.plot(loss_epochs, loss_pde, label='PDE Residual Loss',linestyle='--')
+plt.plot(loss_epochs, loss_constitutive, label='Constitutive Loss',linestyle='--')
+plt.plot(loss_epochs, loss_boundary, label='Boundary Loss',linestyle='--')
+plt.plot(loss_epochs, loss_measurement, label='Measurement Loss',linestyle='--')
+plt.plot(loss_epochs, loss_disp_mse, label='Displacement MSE', linewidth=2)
+plt.yscale('log')
+plt.xlabel("Iterations")
+plt.ylabel("Loss (log scale)")
+plt.title("Loss History (Log Scale)")
+plt.legend()
+plt.grid(True)
+
+# Save the plot locally
+loss_plot_path = os.path.join(results_folder, 'loss_history_log.png')
+plt.savefig(loss_plot_path)
+plt.close()
+print(f"Loss history plot saved to {loss_plot_path}")
+
+# Log the loss plot image to wandb
+wandb.log({"loss_history_log": wandb.Image(loss_plot_path)})
+
 
 # Evaluate the displacement network over all full domain points
 u_full = disp_net(x_full)
