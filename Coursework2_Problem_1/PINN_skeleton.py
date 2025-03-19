@@ -15,7 +15,7 @@ wandb.init(project="Plate_PINN")
 # Log configuration parameters to wandb
 config = wandb.config
 config.learning_rate = 3e-4
-config.measurementloss = True
+config.measurementloss = False
 config.iterations = int(1e5)
 config.Disp_layer = [2, 300, 300, 2]
 config.Stress_layer = [2, 400, 400, 3]
@@ -319,34 +319,37 @@ else:
     else:
         raise FileNotFoundError("Checkpoint not found. Please train the model first or check the checkpoint path.")
 
+"""
     with open(yaml_path, "r") as f:
         history_loaded = yaml.safe_load(f)
 
-    epochs = history_loaded["epoch"]
-    pde_loss = history_loaded["PDE_residual_loss"]
-    constitutive_loss = history_loaded["constitutive_loss"]
-    boundary_loss = history_loaded["boundary_loss"]
-    measurement_loss = history_loaded["measurement_loss"]
-    total_loss = history_loaded["total_loss"]
-    disp_mse = history_loaded["disp_mse"]  
+    loss_epochs = history_loaded["epoch"]
+    loss_pde = history_loaded["PDE_residual_loss"]
+    loss_constitutive = history_loaded["constitutive_loss"]
+    loss_boundary = history_loaded["boundary_loss"]
+    loss_measurement = history_loaded["measurement_loss"]
+    loss_total = history_loaded["total_loss"]
+    loss_disp_mse = history_loaded["disp_mse"]  
 
 # ------------------------- EVALUATION AND PLOTTING -------------------------
 
 
 # After training, create a log-scale plot of all loss values
-plt.figure(figsize=(10, 6))
+plt.figure(figsize=(7, 5), dpi=300)
+plt.plot(loss_epochs, loss_pde, label='PDE Residual Loss', linestyle='--', alpha=0.6)
+plt.plot(loss_epochs, loss_constitutive, label='Constitutive Loss', linestyle='--', alpha=0.6)
+plt.plot(loss_epochs, loss_boundary, label='Boundary Loss', linestyle='--', alpha=0.6)
+plt.plot(loss_epochs, loss_measurement, label='Measurement Loss', linestyle='--', alpha=0.6)
 plt.plot(loss_epochs, loss_total, label='Total Loss', linewidth=2)
-plt.plot(loss_epochs, loss_pde, label='PDE Residual Loss',linestyle='--')
-plt.plot(loss_epochs, loss_constitutive, label='Constitutive Loss',linestyle='--')
-plt.plot(loss_epochs, loss_boundary, label='Boundary Loss',linestyle='--')
-plt.plot(loss_epochs, loss_measurement, label='Measurement Loss',linestyle='--')
 plt.plot(loss_epochs, loss_disp_mse, label='Displacement MSE', linewidth=2)
 plt.yscale('log')
 plt.xlabel("Iterations")
 plt.ylabel("Loss (log scale)")
-plt.title("Loss History (Log Scale)")
+# plt.title("Loss History (Log Scale)")
 plt.legend()
 plt.grid(True)
+plt.ylim(1e-6, 1e0)
+plt.tight_layout()
 
 # Save the plot locally
 loss_plot_path = os.path.join(results_folder, 'loss_history_log.png')
@@ -356,7 +359,7 @@ print(f"Loss history plot saved to {loss_plot_path}")
 
 # Log the loss plot image to wandb
 wandb.log({"loss_history_log": wandb.Image(loss_plot_path)})
-
+"""
 
 # Evaluate the displacement network over all full domain points
 u_full = disp_net(x_full)
@@ -391,14 +394,16 @@ connect = (t_connect - 1).detach().cpu().numpy()  # Adjust connectivity indices 
 triang = mtri.Triangulation(xx, yy, connect)
 
 # Create a plot for σ11
-fig, ax = plt.subplots(figsize=(6, 5))
+fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
 cmap = 'jet'
-im = ax.tripcolor(triang, sigma11, cmap=cmap, shading='flat', vmin=0, vmax=0.7)
-ax.set_title("σ₁₁")
+im = ax.tripcolor(triang, sigma11, cmap=cmap, shading='flat', vmin=0, vmax=0.685)
+# ax.set_title("σ₁₁")
 ax.set_xlabel("X")
 ax.set_ylabel("Y")
+ax.set_aspect('equal')
 fig.colorbar(im, ax=ax)
 plt.tight_layout()
+
 
 plot_path = os.path.join(results_folder, 'predicted_plot.png')
 plt.savefig(plot_path)
@@ -459,3 +464,54 @@ plt.close()
 
 # Log the contour plot image to wandb
 wandb.log({"predicted_stress_plot": wandb.Image(plot_path)})
+
+
+print(mse_loss_func(disp_truth,disp_truth*0))
+
+
+def compute_potential_energy(x_full, stress_pred, strain_pred, connectivity):
+    """
+    Compute the potential energy U for a given PINN solution.
+    
+    Parameters:
+        x_full: (N, 2) array of node coordinates
+        stress_pred: (N, 3) array of predicted stress components [σ11, σ22, σ12]
+        strain_pred: (N, 3) array of predicted strain components [ε11, ε22, ε12]
+        connectivity: (M, 3) array of triangular elements' node indices
+    
+    Returns:
+        U: Potential energy of the solution (Joules)
+    """
+    U = 0  # Initialize total potential energy
+    connectivity = connectivity.astype(int)
+    for tri in connectivity:
+        
+        # Get node coordinates
+        x1, x2, x3 = x_full[tri]
+
+        # Compute element area using determinant formula for a triangle
+        A = 0.5 * abs(
+            (x2[0] - x1[0]) * (x3[1] - x1[1]) - (x3[0] - x1[0]) * (x2[1] - x1[1])
+        )
+        
+        # if A < 1e-10:  # Check if area is too small or degenerate
+        #     continue  # Skip this element to avoid numerical issues
+
+        # Get element-wise average stress and strain
+        sigma_11, sigma_22, sigma_12 = stress_pred[tri].mean(axis=0)
+        strain_11, strain_22, strain_12 = strain_pred[tri].mean(axis=0)
+
+        # Compute strain energy density
+        W = 0.5 * (sigma_11 * strain_11 + sigma_22 * strain_22 + 2 * sigma_12 * strain_12)
+
+        # Integrate over element area
+        U += W * A
+
+    return U
+
+# Compute potential energy for both models
+strain_calc = e.squeeze(-1).detach()
+print(strain_calc.shape)
+U = compute_potential_energy(x_full, sigma_full_calc, strain_calc, connect)
+
+print(f"Potential Energy Found: {U:.6f}")

@@ -12,6 +12,13 @@ from tqdm import tqdm
 # Initialize wandb
 wandb.init(project="Darcy_Flow", config={
     "arch": "CNN",
+    "epochs": 500,
+    "batch_size": 20,
+    "learning_rate": 3e-4,
+    "channel_width": 128,
+    "hidden_layer": 3,
+    "scheduler_step": 5000,
+    "scheduler_gamma": 0.6,
     "do_train": True
 })
 config = wandb.config
@@ -91,18 +98,19 @@ class UnitGaussianNormalizer(object):
 
 # Define CNN architecture
 class CNN(nn.Module):
-    def __init__(self, channel_width=64):
+    def __init__(self, channel_width=64, hidden_layers=5):
         super(CNN, self).__init__()
-        # A simple fully convolutional network that preserves spatial dimensions
-        self.layers = nn.Sequential(
-            nn.Conv2d(1, channel_width, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(channel_width, channel_width, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(channel_width, channel_width, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(channel_width, 1, kernel_size=3, padding=1)
-        )
+        layers = []
+        # Input layer: from 1 channel to channel_width channels.
+        layers.append(nn.Conv2d(1, channel_width, kernel_size=3, padding=1))
+        layers.append(nn.ReLU())
+        # Add hidden layers.
+        for _ in range(hidden_layers):
+            layers.append(nn.Conv2d(channel_width, channel_width, kernel_size=3, padding=1))
+            layers.append(nn.ReLU())
+        # Output layer: map channel_width channels back to 1 channel.
+        layers.append(nn.Conv2d(channel_width, 1, kernel_size=3, padding=1))
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
         # x shape: (batch_size, H, W); add channel dimension for CNN
@@ -141,7 +149,7 @@ if __name__ == '__main__':
     train_loader = Data.DataLoader(train_set, batch_size=config.batch_size, shuffle=True)
     
     ############################# Define and train network #############################
-    net = CNN(channel_width=config.channel_width).to(device)
+    net = CNN(config.channel_width,config.hidden_layer).to(device)
     n_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print('Number of parameters: %d' % n_params)
     
@@ -151,7 +159,7 @@ if __name__ == '__main__':
     
     epochs = config.epochs
 
-    model_weights_path = os.path.join(result_folder, 'fno_model.pth')
+    model_weights_path = os.path.join(result_folder, 'cnn_model.pth')
     if config.do_train:
         loss_train_list = []
         loss_test_list = []
@@ -197,7 +205,7 @@ if __name__ == '__main__':
         print(f"Model weights saved to {model_weights_path}")
 
         ############################# Save Loss Curves #############################
-        plt.figure(figsize=(8,5))
+        plt.figure(figsize=(6,5), dpi=300)
         plt.plot(epoch_list, loss_train_list, label='Train Loss')
         plt.plot(epoch_list, loss_test_list, label='Test Loss')
         plt.xlabel('Epoch')
@@ -205,6 +213,7 @@ if __name__ == '__main__':
         plt.legend()
         plt.grid(True)
         plt.title('Training and Test Loss vs. Epochs')
+        plt.ylim(0, max(max(loss_train_list), max(loss_test_list))*1.1)
         loss_plot_path = os.path.join(result_folder, 'loss_plot.png')
         plt.savefig(loss_plot_path)
         plt.close()
@@ -236,7 +245,7 @@ if __name__ == '__main__':
     # Abs Diff
     abs_diff = np.abs(sample_true - sample_pred)
 
-    plt.figure(figsize=(18,5))
+    plt.figure(figsize=(12,4), dpi=300)
 
     # True
     plt.subplot(1,3,1)
@@ -245,6 +254,7 @@ if __name__ == '__main__':
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     # Pred
     plt.subplot(1,3,2)
@@ -253,6 +263,7 @@ if __name__ == '__main__':
     plt.title('Predicted Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     # Diff
     plt.subplot(1,3,3)
@@ -261,6 +272,7 @@ if __name__ == '__main__':
     plt.title('Absolute Difference')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     plt.tight_layout()
     contour_plot_path = os.path.join(result_folder, 'contour_plot.png')

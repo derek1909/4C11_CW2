@@ -14,10 +14,11 @@ wandb.init(project="Darcy_Flow", config={
     "arch": "FNO",
     "epochs": 250,
     "batch_size": 20,
-    "learning_rate": 1e-3,
+    "learning_rate": 3e-4,
     "modes": 12,
-    "width": 32,
-    "scheduler_step": 1000,
+    "width": 64,
+    "scheduler_step": 2000,
+    "scheduler_gamma": 0.6,
     "do_train": True
 
 })
@@ -321,8 +322,8 @@ if __name__ == '__main__':
         torch.save(net.state_dict(), model_weights_path)
         print(f"Model weights saved to {model_weights_path}")
         
-        ############################# Save Loss Curves #############################
-        plt.figure(figsize=(8,5))
+       ############################# Save Loss Curves #############################
+        plt.figure(figsize=(6,5), dpi=300)
         plt.plot(epoch_list, loss_train_list, label='Train Loss')
         plt.plot(epoch_list, loss_test_list, label='Test Loss')
         plt.xlabel('Epoch')
@@ -335,10 +336,10 @@ if __name__ == '__main__':
         plt.savefig(loss_plot_path)
         plt.close()
         wandb.log({"loss_plot": wandb.Image(loss_plot_path)})
+        
     else:
         net.load_state_dict(torch.load(model_weights_path, map_location=device))
         print(f"Model weights loaded from {model_weights_path}")
-    
     ############################# Contour Plots for a Single Test Sample #############################
     sample_index = 0
     sample_a = a_test[sample_index:sample_index+1]  # shape: (1, H, W)
@@ -362,7 +363,7 @@ if __name__ == '__main__':
     # Abs Diff
     abs_diff = np.abs(sample_true - sample_pred)
 
-    plt.figure(figsize=(18,5))
+    plt.figure(figsize=(12,4), dpi=300)
 
     # True
     plt.subplot(1,3,1)
@@ -371,6 +372,7 @@ if __name__ == '__main__':
     plt.title('True Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     # Pred
     plt.subplot(1,3,2)
@@ -379,6 +381,7 @@ if __name__ == '__main__':
     plt.title('Predicted Solution $u(x)$')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     # Diff
     plt.subplot(1,3,3)
@@ -387,6 +390,7 @@ if __name__ == '__main__':
     plt.title('Absolute Difference')
     plt.xlabel('x')
     plt.ylabel('y')
+    plt.axis('equal') 
 
     plt.tight_layout()
     contour_plot_path = os.path.join(result_folder, 'contour_plot.png')
